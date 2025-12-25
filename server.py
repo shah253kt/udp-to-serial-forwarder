@@ -166,7 +166,7 @@ class UDPBroadcastServer:
                     
                     for client_address in clients_copy:
                         try:
-                            message = f"{line}\n".encode('utf-8')
+                            message = f"{line}\r\n".encode('utf-8')
                             self.socket.sendto(message, client_address)
                         except Exception as e:
                             logger.error(f"Error sending to {client_address}: {e}")
