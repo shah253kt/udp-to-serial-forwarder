@@ -127,7 +127,7 @@ class UDPClient:
             try:
                 self.socket.settimeout(1.0)
                 data, address = self.socket.recvfrom(BUFFER_SIZE)
-                message = data.decode('utf-8').rstrip('\n\r')
+                message = data.decode('utf-8')
                 
                 if message == 'ACK':
                     logger.debug("Received acknowledgment from server")
