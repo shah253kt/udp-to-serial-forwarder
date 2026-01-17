@@ -1,211 +1,118 @@
 """
-UDP Server - File Line Broadcaster
-Reads a file and broadcasts each line every second to all connected clients.
+UDP Server - Router Simulator
+Simulates a router broadcasting GPS NMEA data over UDP port 2947.
+Reads lines from a file and broadcasts them continuously.
 """
 
 import socket
-import logging
 import time
-import threading
-from typing import Set, Tuple
-from pathlib import Path
+import logging
 import sys
+from pathlib import Path
 
 
 # Configuration
-DEFAULT_HOST = '0.0.0.0'  # Listen on all interfaces
-DEFAULT_PORT = 2947
-DEFAULT_DATA_FILE = 'payload.txt'
-BROADCAST_INTERVAL = 1.0  # seconds
-BUFFER_SIZE = 4096
-HEARTBEAT_TIMEOUT = 30  # Remove clients that haven't sent heartbeat in 30s
+UDP_IP = "127.0.0.1"  # localhost for testing, use "0.0.0.0" for all interfaces
+UDP_PORT = 2947
+DATA_FILE = 'payload.txt'
+BROADCAST_INTERVAL = 1.0  # seconds between broadcasts
 
 
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('udp_server.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
 
-class UDPBroadcastServer:
-    """UDP server that broadcasts file lines to all connected clients."""
+class UDPBroadcaster:
+    """Simulates a router broadcasting UDP data."""
     
-    def __init__(self, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, 
-                 data_file: str = DEFAULT_DATA_FILE):
+    def __init__(self, host: str = UDP_IP, port: int = UDP_PORT, 
+                 data_file: str = DATA_FILE, interval: float = BROADCAST_INTERVAL):
         """
-        Initialize the UDP broadcast server.
+        Initialize the UDP broadcaster.
         
         Args:
-            host: Host address to bind to
-            port: Port number to bind to
-            data_file: Path to the file containing data to broadcast
+            host: IP address to broadcast from
+            port: UDP port number
+            data_file: Path to file containing data to broadcast
+            interval: Time interval between broadcasts in seconds
         """
         self.host = host
         self.port = port
         self.data_file = Path(data_file)
-        self.clients: Set[Tuple[str, int]] = set()
-        self.client_last_seen: dict = {}
-        self.running = False
+        self.interval = interval
         self.socket = None
-        self.lock = threading.Lock()
+        self.running = False
         
-    def validate_data_file(self) -> bool:
+    def load_data(self) -> list:
         """
-        Validate that the data file exists and is readable.
-        
-        Returns:
-            True if file is valid, False otherwise
-        """
-        if not self.data_file.exists():
-            logger.error(f"Data file not found: {self.data_file}")
-            return False
-        if not self.data_file.is_file():
-            logger.error(f"Path is not a file: {self.data_file}")
-            return False
-        return True
-    
-    def read_file_lines(self) -> list:
-        """
-        Read and return all lines from the data file.
+        Load data lines from the file.
         
         Returns:
             List of lines from the file
         """
         try:
             with open(self.data_file, 'r', encoding='utf-8') as f:
-                lines = [line.rstrip('\n\r') for line in f.readlines()]
-            logger.info(f"Read {len(lines)} lines from {self.data_file}")
+                lines = [line.rstrip('\n\r') for line in f.readlines() if line.strip()]
+            logger.info(f"Loaded {len(lines)} lines from {self.data_file}")
             return lines
+        except FileNotFoundError:
+            logger.error(f"Data file not found: {self.data_file}")
+            return []
         except Exception as e:
-            logger.error(f"Error reading file {self.data_file}: {e}")
+            logger.error(f"Error reading file: {e}")
             return []
     
-    def add_client(self, address: Tuple[str, int]):
-        """
-        Add a client to the broadcast list.
-        
-        Args:
-            address: Tuple of (ip, port) for the client
-        """
-        with self.lock:
-            if address not in self.clients:
-                self.clients.add(address)
-                logger.info(f"New client connected: {address[0]}:{address[1]}")
-            self.client_last_seen[address] = time.time()
-    
-    def remove_stale_clients(self):
-        """Remove clients that haven't sent a heartbeat recently."""
-        current_time = time.time()
-        with self.lock:
-            stale_clients = [
-                addr for addr, last_seen in self.client_last_seen.items()
-                if current_time - last_seen > HEARTBEAT_TIMEOUT
-            ]
-            for addr in stale_clients:
-                self.clients.discard(addr)
-                del self.client_last_seen[addr]
-                logger.info(f"Removed stale client: {addr[0]}:{addr[1]}")
-    
-    def listen_for_clients(self):
-        """Listen for incoming client messages (heartbeats/registration)."""
-        logger.info("Started listening for client connections")
-        while self.running:
-            try:
-                self.socket.settimeout(1.0)
-                data, address = self.socket.recvfrom(BUFFER_SIZE)
-                message = data.decode('utf-8').strip()
-                
-                if message in ['CONNECT', 'HEARTBEAT']:
-                    self.add_client(address)
-                    # Send acknowledgment
-                    self.socket.sendto(b'ACK', address)
-                elif message == 'DISCONNECT':
-                    with self.lock:
-                        self.clients.discard(address)
-                        self.client_last_seen.pop(address, None)
-                    logger.info(f"Client disconnected: {address[0]}:{address[1]}")
-                    
-            except socket.timeout:
-                continue
-            except Exception as e:
-                if self.running:
-                    logger.error(f"Error receiving client message: {e}")
-    
-    def broadcast_lines(self):
-        """Broadcast file lines to all connected clients."""
-        logger.info("Started broadcasting file lines")
-        
-        while self.running:
-            lines = self.read_file_lines()
-            if not lines:
-                logger.warning("No lines to broadcast, waiting...")
-                time.sleep(BROADCAST_INTERVAL)
-                continue
-            
-            for line in lines:
-                if not self.running:
-                    break
-                
-                # Remove stale clients periodically
-                self.remove_stale_clients()
-                
-                with self.lock:
-                    client_count = len(self.clients)
-                    clients_copy = self.clients.copy()
-                
-                if client_count == 0:
-                    logger.debug("No clients connected, skipping broadcast")
-                else:
-                    logger.info(f"Broadcasting to {client_count} client(s): {line[:50]}...")
-                    
-                    for client_address in clients_copy:
-                        try:
-                            message = f"{line}\r\n".encode('utf-8')
-                            self.socket.sendto(message, client_address)
-                        except Exception as e:
-                            logger.error(f"Error sending to {client_address}: {e}")
-                            with self.lock:
-                                self.clients.discard(client_address)
-                                self.client_last_seen.pop(client_address, None)
-                
-                time.sleep(BROADCAST_INTERVAL)
-    
     def start(self):
-        """Start the UDP broadcast server."""
-        if not self.validate_data_file():
-            raise FileNotFoundError(f"Cannot start server: {self.data_file} not found")
+        """Start broadcasting UDP data."""
+        # Load data from file
+        lines = self.load_data()
+        if not lines:
+            logger.error("No data to broadcast. Exiting.")
+            return
         
         try:
-            # Create and bind socket
+            # Create UDP socket
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.socket.bind((self.host, self.port))
-            
-            logger.info(f"UDP Server started on {self.host}:{self.port}")
-            logger.info(f"Broadcasting from file: {self.data_file}")
+            logger.info(f"UDP broadcaster started on {self.host}:{self.port}")
+            logger.info(f"Broadcasting {len(lines)} lines every {self.interval} seconds")
+            logger.info("Press Ctrl+C to stop")
             
             self.running = True
+            line_index = 0
             
-            # Start listener thread
-            listener_thread = threading.Thread(target=self.listen_for_clients, daemon=True)
-            listener_thread.start()
-            
-            # Start broadcaster thread (main thread)
-            self.broadcast_lines()
-            
+            # Broadcast loop
+            while self.running:
+                # Get current line (cycle through the file)
+                line = lines[line_index]
+                
+                # Send data
+                try:
+                    message = f"{line}\r\n".encode('utf-8')
+                    self.socket.sendto(message, (self.host, self.port))
+                    logger.info(f"Broadcast [{line_index + 1}/{len(lines)}]: {line[:60]}...")
+                except Exception as e:
+                    logger.error(f"Error broadcasting: {e}")
+                
+                # Move to next line (loop back to start when done)
+                line_index = (line_index + 1) % len(lines)
+                
+                # Wait before next broadcast
+                time.sleep(self.interval)
+                
         except Exception as e:
-            logger.error(f"Error starting server: {e}")
+            logger.error(f"Error in broadcaster: {e}")
             raise
+        finally:
+            self.stop()
     
     def stop(self):
-        """Stop the UDP broadcast server."""
-        logger.info("Stopping server...")
+        """Stop the broadcaster."""
+        logger.info("Stopping broadcaster...")
         self.running = False
         
         if self.socket:
@@ -214,31 +121,33 @@ class UDPBroadcastServer:
             except Exception as e:
                 logger.error(f"Error closing socket: {e}")
         
-        logger.info("Server stopped")
+        logger.info("Broadcaster stopped")
 
 
 def main():
     """Main entry point."""
     import argparse
     
-    parser = argparse.ArgumentParser(description='UDP File Line Broadcaster')
-    parser.add_argument('--host', default=DEFAULT_HOST, help='Host to bind to')
-    parser.add_argument('--port', type=int, default=DEFAULT_PORT, help='Port to bind to')
-    parser.add_argument('--file', default=DEFAULT_DATA_FILE, help='Data file to broadcast')
+    parser = argparse.ArgumentParser(description='UDP Router Simulator - Broadcasts GPS data over UDP')
+    parser.add_argument('--host', default=UDP_IP, help=f'IP address to broadcast from (default: {UDP_IP})')
+    parser.add_argument('--port', type=int, default=UDP_PORT, help=f'UDP port number (default: {UDP_PORT})')
+    parser.add_argument('--file', default=DATA_FILE, help=f'Data file to broadcast (default: {DATA_FILE})')
+    parser.add_argument('--interval', type=float, default=BROADCAST_INTERVAL, 
+                        help=f'Seconds between broadcasts (default: {BROADCAST_INTERVAL})')
     
     args = parser.parse_args()
     
-    server = UDPBroadcastServer(args.host, args.port, args.file)
+    broadcaster = UDPBroadcaster(args.host, args.port, args.file, args.interval)
     
     try:
-        server.start()
+        broadcaster.start()
     except KeyboardInterrupt:
-        logger.info("Received interrupt signal")
+        logger.info("\nReceived interrupt signal")
     except Exception as e:
-        logger.error(f"Server error: {e}")
-    finally:
-        server.stop()
+        logger.error(f"Broadcaster error: {e}")
+        sys.exit(1)
 
 
 if __name__ == '__main__':
     main()
+
